@@ -10,4 +10,5 @@ type Task struct {
 	CreatedAt  time.Time `json:"created_at"`  // Timestamp when the task was created
 	ExecuteAt  time.Time `json:"execute_at"`  // Scheduled execution time
 	RetryCount int       `json:"retry_count"` // Number of retries allowed
+	Owner      string    `json:"owner"`       // Worker ID that owns the task
 }

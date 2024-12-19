@@ -55,9 +55,24 @@ func (w *Worker) processTasks() {
 
 	for _, task := range tasks {
 		if task.Status == "pending" && task.ExecuteAt.Before(time.Now()) {
-			w.processTask(task)
+			if task.Owner == "" || task.Owner == w.ID {
+				w.claimAndProcessTask(task)
+			}
 		}
 	}
+}
+
+// claimAndProcessTask claims the ownership and processes task
+func (w *Worker) claimAndProcessTask(task common.Task) {
+	// Claim the task by assigning ownership
+	task.Owner = w.ID
+	if err := w.Store.AddTask(task); err != nil {
+		log.Printf("Worker %s: failed to claim task %s: %v", w.ID, task.ID, err)
+		return
+	}
+
+	// Proceed with task processing
+	w.processTask(task)
 }
 
 // processTask transitions the task through processing and completion
