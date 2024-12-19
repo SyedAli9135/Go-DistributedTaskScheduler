@@ -8,6 +8,9 @@ import (
 )
 
 func main() {
+	// Initializes etcd storage
+	api.InitStore()
+
 	// Initialize gin router
 	router := gin.Default()
 
