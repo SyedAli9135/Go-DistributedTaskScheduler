@@ -163,29 +163,80 @@ func (s *EtcdStore) AtomicUpdateTaskOwnership(task common.Task) error {
 // AcquireLock tries to acquire a lock for the given task.
 // Returns an error if the lock could not be acquired.
 func (s *EtcdStore) AcquireLock(taskID string, workerID string) error {
-	lockKey := "locks/" + taskID
+	// Create a context with timeout to ensure our operation doesn't hang forever
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// Try to acquire the lock by creating a key with a unique value for the worker
-	_, err := s.client.Put(ctx, lockKey, workerID, clientv3.WithLease(clientv3.LeaseID(0)))
+	// Create a lease - this is like a time-limited contract
+	// The lease will automatically expire after 30 seconds
+	// This prevents deadlocks if a worker crashes while holding a lock
+	lease, err := s.client.Grant(ctx, 30) // 30 second TTL
 	if err != nil {
-		return fmt.Errorf("failed to acquire lock for task %s: %v", taskID, err)
+		return fmt.Errorf("failed to create lease: %w", err)
+	}
+
+	// Create the key that will be used in etcd to represent this lock
+	// For example, if taskID is "task123", lockKey will be "locks/task123"
+	lockKey := fmt.Sprintf("locks/%s", taskID)
+
+	// Try to acquire lock using a transaction to ensure our operations are automic
+	txn := s.client.Txn(ctx).
+		// Check if the key doesn't exist
+		If(clientv3.Compare(clientv3.CreateRevision(lockKey), "=", 0)).
+		// If it doesn't exist, create it with our lease
+		Then(clientv3.OpPut(lockKey, workerID, clientv3.WithLease(lease.ID))).
+		// If it exists, get its value
+		Else(clientv3.OpGet(lockKey))
+
+	// Try to execute the transaction
+	txnResp, err := txn.Commit()
+	if err != nil {
+		return fmt.Errorf("failed to execute transaction: %w", err)
+	}
+
+	// If the transaction's condition was false (key exists), it means someone else has the lock
+	if !txnResp.Succeeded {
+		return fmt.Errorf("lock already held by another worker")
 	}
 
 	return nil
 }
 
-// ReleaseLock releases the lock for the given task
+// Releases the acquired lock by etcd
 func (s *EtcdStore) ReleaseLock(taskID string) error {
-	lockKey := "locks/" + taskID
+	// Create a context with timeout to ensure our operation doesn't hang
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// Delete the lock key to release the lock
-	_, err := s.client.Delete(ctx, lockKey)
+	// Create the lock key - same format as in AcquireLock
+	lockKey := fmt.Sprintf("locks/%s", taskID)
+
+	// Get the current lock value and lease
+	resp, err := s.client.Get(ctx, lockKey, clientv3.WithPrefix())
 	if err != nil {
-		return fmt.Errorf("failed to release lock for task %s: %v", taskID, err)
+		return fmt.Errorf("failed to get lock info: %w", err)
+	}
+
+	// If the key doesn't exist, nothing to release
+	if len(resp.Kvs) == 0 {
+		return nil
+	}
+
+	// Get the lease ID from the key
+	leaseID := clientv3.LeaseID(resp.Kvs[0].Lease)
+
+	// Delete the lock key
+	_, err = s.client.Delete(ctx, lockKey)
+	if err != nil {
+		return fmt.Errorf("failed to delete lock: %w", err)
+	}
+
+	// Revoke the lease if it exists
+	if leaseID != 0 {
+		_, err = s.client.Revoke(ctx, leaseID)
+		if err != nil {
+			return fmt.Errorf("failed to revoke lease: %w", err)
+		}
 	}
 
 	return nil

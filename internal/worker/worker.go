@@ -57,20 +57,22 @@ func (w *Worker) processTasks() {
 		if task.Status == "pending" && task.ExecuteAt.Before(time.Now()) {
 			if task.Owner == "" {
 				log.Printf("Worker %s: attempting to claim task %s", w.ID, task.ID)
-				// Acquire a lock for this task before attempting to claim
+
+				// Try to acquire the lock
 				err := w.Store.AcquireLock(task.ID, w.ID)
 				if err != nil {
-					log.Printf("Worker %s: could not acquire lock for task %s, it might be already in progress: %v", w.ID, task.ID, err)
-					continue // Skip to next task if the lock can't be acquired
+					// If we couldn't get the lock, just skip this task
+					log.Printf("Worker %s: could not acquire lock for task %s: %v", w.ID, task.ID, err)
+					continue
 				}
 
-				// If lock acquired, try claiming and processing the task
+				// If we got the lock, process the task
 				w.claimAndProcessTask(task)
 
 				// After processing, release the lock
-				w.Store.ReleaseLock(task.ID)
-			} else {
-				log.Printf("Worker %s: task %s is already claimed by worker %s", w.ID, task.ID, task.Owner)
+				if err := w.Store.ReleaseLock(task.ID); err != nil {
+					log.Printf("Worker %s: failed to release lock for task %s: %v", w.ID, task.ID, err)
+				}
 			}
 		}
 	}
@@ -80,6 +82,7 @@ func (w *Worker) processTasks() {
 func (w *Worker) claimAndProcessTask(task common.Task) {
 	// Claim the task by assigning ownership
 	task.Owner = w.ID
+	task.Status = "processing"
 	if err := w.Store.AtomicUpdateTaskOwnership(task); err != nil {
 		log.Printf("Worker %s: failed to claim task %s: %v", w.ID, task.ID, err)
 		return
