@@ -108,3 +108,85 @@ func (s *EtcdStore) ListTasks() ([]common.Task, error) {
 
 	return tasks, nil
 }
+
+// AtomicUpdateTaskOwnership attempts to atomically update the task's ownership.
+// It succeeds only if the task's Owner field is empty (i.e., not claimed).
+func (s *EtcdStore) AtomicUpdateTaskOwnership(task common.Task) error {
+	// Use a context with timeout to avoid blocking indefinitely
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	key := "tasks/" + task.ID
+
+	// Fetch the current task from Etcd
+	resp, err := s.client.Get(ctx, key)
+	if err != nil {
+		return fmt.Errorf("failed to fetch task: %v", err)
+	}
+
+	// If the task doesn't exist, return an error
+	if len(resp.Kvs) == 0 {
+		return fmt.Errorf("task %s not found", task.ID)
+	}
+
+	// Unmarshal the task from Etcd
+	currentTask := &common.Task{}
+	if err := json.Unmarshal(resp.Kvs[0].Value, currentTask); err != nil {
+		return fmt.Errorf("failed to unmarshal task: %v", err)
+	}
+
+	// If the task already has an owner, return an error (it has already been claimed)
+	if currentTask.Owner != "" {
+		return fmt.Errorf("task %s is already claimed by worker %s", task.ID, currentTask.Owner)
+	}
+
+	// Marshal the updated task (with ownership assigned to the worker)
+	taskData, err := json.Marshal(task)
+	if err != nil {
+		return fmt.Errorf("failed to marshal task: %v", err)
+	}
+
+	// Use Etcd's Transaction (Txn) to atomically update the task
+	_, err = s.client.Txn(ctx).
+		If(clientv3.Compare(clientv3.Value(key), "=", "")).
+		Then(clientv3.OpPut(key, string(taskData))).
+		Else(clientv3.OpGet(key)).
+		Commit()
+
+	if err != nil {
+		return fmt.Errorf("failed to atomically update task: %v", err)
+	}
+
+	return nil
+}
+
+// AcquireLock tries to acquire a lock for the given task.
+// Returns an error if the lock could not be acquired.
+func (s *EtcdStore) AcquireLock(taskID string, workerID string) error {
+	lockKey := "locks/" + taskID
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Try to acquire the lock by creating a key with a unique value for the worker
+	_, err := s.client.Put(ctx, lockKey, workerID, clientv3.WithLease(clientv3.LeaseID(0)))
+	if err != nil {
+		return fmt.Errorf("failed to acquire lock for task %s: %v", taskID, err)
+	}
+
+	return nil
+}
+
+// ReleaseLock releases the lock for the given task
+func (s *EtcdStore) ReleaseLock(taskID string) error {
+	lockKey := "locks/" + taskID
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Delete the lock key to release the lock
+	_, err := s.client.Delete(ctx, lockKey)
+	if err != nil {
+		return fmt.Errorf("failed to release lock for task %s: %v", taskID, err)
+	}
+
+	return nil
+}
