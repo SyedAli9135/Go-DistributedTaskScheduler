@@ -16,12 +16,13 @@ var store *storage.EtcdStore
 
 // InitStore initializes the etcd store with default configurations
 // This function sets up the etcd store instance globally.
-func InitStore() {
+func InitStore() *storage.EtcdStore {
 	var err error
 	store, err = storage.NewEtcdStore([]string{"localhost:2379"}, 5*time.Second)
 	if err != nil {
 		panic("Failed to initialize etcd store: " + err.Error())
 	}
+	return store
 }
 
 // SetupRoutes initializes the API routes
